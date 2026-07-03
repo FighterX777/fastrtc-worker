@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voice API Test</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: monospace;
+      background: #0d0d0d;
+      color: #00ff88;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      gap: 32px;
+    }
+
+    h1 { font-size: 1.2rem; letter-spacing: 4px; opacity: 0.7; }
+
+    #btn {
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      border: 3px solid #00ff88;
+      background: transparent;
+      color: #00ff88;
+      font-family: monospace;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+    }
+
+    #btn:hover { background: rgba(0,255,136,0.05); }
+    #btn.connecting { border-color: #ffaa00; color: #ffaa00; animation: pulse-border 1s infinite; }
+    #btn.connected  { border-color: #ff4466; color: #ff4466; }
+
+    @keyframes pulse-border {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(255,170,0,0.4); }
+      50%       { box-shadow: 0 0 0 12px rgba(255,170,0,0); }
+    }
+
+    #status {
+      font-size: 0.75rem;
+      letter-spacing: 2px;
+      opacity: 0.5;
+      min-height: 1em;
+    }
+
+    #visualizer {
+      display: flex;
+      align-items: flex-end;
+      gap: 3px;
+      height: 48px;
+      width: 200px;
+    }
+
+    .bar {
+      flex: 1;
+      background: #00ff88;
+      border-radius: 2px;
+      min-height: 3px;
+      transition: height 0.05s ease;
+    }
+
+    #log {
+      width: 360px;
+      max-height: 160px;
+      overflow-y: auto;
+      border: 1px solid #1a1a1a;
+      padding: 10px;
+      font-size: 0.7rem;
+      line-height: 1.6;
+      opacity: 0.6;
+    }
+
+    .log-user      { color: #00aaff; }
+    .log-assistant { color: #00ff88; }
+    .log-system    { color: #888; }
+  </style>
+</head>
+<body>
+  <h1>VOICE API TEST</h1>
+
+  <div id="visualizer">
+    <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+    <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+    <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+    <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+    <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+    <div class="bar"></div>
+  </div>
+
+  <button id="btn">START</button>
+  <div id="status">click to connect</div>
+
+  <div id="log"></div>
+  <audio id="audio-out" autoplay></audio>
+
+  <script>
+    const btn       = document.getElementById('btn');
+    const status    = document.getElementById('status');
+    const logEl     = document.getElementById('log');
+    const audioOut  = document.getElementById('audio-out');
+    const bars      = document.querySelectorAll('.bar');
+
+    let pc, audioCtx, analyser, animId, webrtc_id;
+
+    function log(msg, cls = 'log-system') {
+      const d = document.createElement('div');
+      d.className = cls;
+      d.textContent = msg;
+      logEl.appendChild(d);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setStatus(s) { status.textContent = s; }
+
+    function animateBars() {
+      if (!analyser) return;
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(data);
+      bars.forEach((bar, i) => {
+        const v = (data[i * 2] || 0) / 255;
+        bar.style.height = Math.max(3, v * 48) + 'px';
+      });
+      animId = requestAnimationFrame(animateBars);
+    }
+
+    async function connect() {
+      btn.className = 'connecting';
+      btn.textContent = '...';
+      setStatus('connecting');
+
+      pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+      webrtc_id = crypto.randomUUID();
+
+      // mic
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(t => pc.addTrack(t, stream));
+
+      // visualize mic input
+      audioCtx = new AudioContext();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 64;
+      audioCtx.createMediaStreamSource(stream).connect(analyser);
+      animateBars();
+
+      // incoming audio
+      pc.ontrack = (e) => {
+        audioOut.srcObject = e.streams[0];
+        log('← assistant speaking', 'log-assistant');
+      };
+
+      // data channel for log events
+      const dc = pc.createDataChannel('text');
+      dc.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'log') {
+          if (msg.data === 'pause_detected')    setStatus('processing...');
+          if (msg.data === 'response_starting') setStatus('speaking');
+          if (msg.data === 'started_talking')   setStatus('listening...');
+        }
+        if (msg.type === 'error') log('error: ' + msg.message, 'log-system');
+      };
+
+      pc.onconnectionstatechange = () => {
+        log('connection state: ' + pc.connectionState, 'log-system');
+        if (pc.connectionState === 'connected') {
+          btn.className = 'connected';
+          btn.textContent = 'STOP';
+          setStatus('listening...');
+          log('connected', 'log-system');
+        }
+        if (['failed'].includes(pc.connectionState)) {
+          disconnect();
+        }
+      };
+
+      pc.onicecandidate = (e) => log('ICE candidate: ' + (e.candidate ? e.candidate.type : 'null'), 'log-system');
+      pc.onicegatheringstatechange = () => log('ICE gathering: ' + pc.iceGatheringState, 'log-system');
+
+      // offer
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      await new Promise(resolve => {
+        if (pc.iceGatheringState === 'complete') return resolve();
+        const timeout = setTimeout(resolve, 5000); // don't wait forever
+        pc.addEventListener('icegatheringstatechange', () => {
+          if (pc.iceGatheringState === 'complete') {
+            clearTimeout(timeout);
+            resolve();
+          }
+        });
+      });
+      log('ICE gathering done, state: ' + pc.iceGatheringState, 'log-system');
+
+      const res = await fetch('/webrtc/offer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sdp: pc.localDescription.sdp,
+          type: pc.localDescription.type,
+          webrtc_id
+        })
+      });
+
+      if (!res.ok) {
+        log(`server error ${res.status}`, 'log-system');
+        disconnect();
+        return;
+      }
+
+      const answer = await res.json();
+      if (answer.status === 'failed') {
+        log('connection rejected: ' + answer.meta.error, 'log-system');
+        disconnect();
+        return;
+      }
+
+      await pc.setRemoteDescription(answer);
+    }
+
+    function disconnect() {
+      if (animId) cancelAnimationFrame(animId);
+      if (pc) pc.close();
+      if (audioCtx) audioCtx.close();
+      pc = analyser = audioCtx = null;
+      btn.className = '';
+      btn.textContent = 'START';
+      setStatus('disconnected');
+      log('disconnected', 'log-system');
+    }
+
+    btn.addEventListener('click', () => {
+      if (!pc || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+        connect().catch(err => {
+          log('error: ' + err.message, 'log-system');
+          disconnect();
+        });
+      } else {
+        disconnect();
+      }
+    });
+  </script>
+</body>
+</html>
