@@ -9,5 +9,7 @@ groq
 openai
 python-dotenv
 uvicorn[standard]
+fastapi
+pydantic
 pydub
 gtts

@@ -14,6 +14,7 @@ from fastrtc.utils import audio_to_bytes
 from groq import Groq
 from gtts import gTTS
 from openai import OpenAI
+from pydantic import BaseModel
 from pydub import AudioSegment
 
 load_dotenv()
@@ -112,6 +113,22 @@ def index():
 def clear_session(webrtc_id: str):
     sessions.pop(webrtc_id, None)
     return {"status": "cleared"}
+
+
+# ─── Session init: seed history with a custom system prompt ──────────────────
+class SessionInitBody(BaseModel):
+    system_prompt: str
+
+
+@app.post("/session/init/{webrtc_id}")
+def init_session(webrtc_id: str, body: SessionInitBody):
+    """Pre-seed chat history with a custom system prompt before the WebRTC call starts.
+    Called by the Node.js backend right before the SDP handshake so the AI
+    knows which questions to ask (question-bank mode) or which GitHub repos
+    to discuss (github mode).
+    """
+    sessions[webrtc_id] = [{"role": "system", "content": body.system_prompt}]
+    return {"status": "ok", "webrtc_id": webrtc_id}
 
 
 @app.get("/session/{webrtc_id}")
