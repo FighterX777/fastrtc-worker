@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +29,8 @@ nim_client = OpenAI(
 
 # Per-session chat history keyed by webrtc_id
 sessions: dict[str, list[dict[str, str]]] = {}
+# Map webrtc_id -> interview_id
+session_interviews: dict[str, str] = {}
 
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
@@ -80,6 +83,19 @@ def respond(audio: tuple[int, np.ndarray]):
 
     history.append({"role": "assistant", "content": reply})
 
+    # Save to Node.js backend database if we have an interview_id
+    interview_id = session_interviews.get(ctx.webrtc_id)
+    if interview_id:
+        try:
+            backend_url = os.getenv("BACKEND_URL", "http://localhost:3001")
+            requests.post(
+                f"{backend_url}/api/v1/session/assistant/response/{interview_id}",
+                json={"message": reply},
+                timeout=5
+            )
+        except Exception as e:
+            print("Failed to save assistant message to backend:", e)
+
     # 3. TTS — Google TTS (free, no key needed)
     yield from gtts_tts(reply)
 
@@ -112,12 +128,14 @@ def index():
 @app.delete("/session/{webrtc_id}")
 def clear_session(webrtc_id: str):
     sessions.pop(webrtc_id, None)
+    session_interviews.pop(webrtc_id, None)
     return {"status": "cleared"}
 
 
 # ─── Session init: seed history with a custom system prompt ──────────────────
 class SessionInitBody(BaseModel):
     system_prompt: str
+    interview_id: str | None = None
 
 
 @app.post("/session/init/{webrtc_id}")
@@ -128,6 +146,8 @@ def init_session(webrtc_id: str, body: SessionInitBody):
     to discuss (github mode).
     """
     sessions[webrtc_id] = [{"role": "system", "content": body.system_prompt}]
+    if body.interview_id:
+        session_interviews[webrtc_id] = body.interview_id
     return {"status": "ok", "webrtc_id": webrtc_id}
 
 
